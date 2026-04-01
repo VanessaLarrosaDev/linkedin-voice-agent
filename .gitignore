@@ -1,0 +1,6 @@
+.env
+posts_publicados.json
+__pycache__/
+*.pyc
+.venv/
+venv/
