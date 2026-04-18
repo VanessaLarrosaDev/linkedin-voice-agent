@@ -26,6 +26,9 @@ respuesta_queue: asyncio.Queue[str] = asyncio.Queue()
 # Callback que main.py registra para procesar mensajes entrantes
 _on_message_callback = None
 
+# Foto pendiente de publicar (se establece cuando Vanessa adjunta una imagen)
+_pending_photo: dict | None = None
+
 
 def set_message_callback(callback) -> None:
     """Registra un callback que se ejecuta al recibir un mensaje de Vanessa."""
@@ -55,6 +58,33 @@ async def enviar_y_esperar_respuesta(texto: str, timeout: int = 3600) -> str:
         return respuesta.strip()
     except asyncio.TimeoutError:
         return ""
+
+
+def get_pending_photo() -> dict | None:
+    """Devuelve y limpia la foto pendiente (file_id). Llamar justo antes de publicar."""
+    global _pending_photo
+    photo = _pending_photo
+    _pending_photo = None
+    return photo
+
+
+async def _handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler para mensajes con foto adjunta."""
+    if not update.message or not update.message.photo:
+        return
+
+    if str(update.message.chat_id) != TELEGRAM_CHAT_ID:
+        return
+
+    global _pending_photo
+    _pending_photo = {"file_id": update.message.photo[-1].file_id}
+
+    caption = (update.message.caption or "").strip()
+    texto_cola = caption if caption else "PUBLICAR"
+    await respuesta_queue.put(texto_cola)
+
+    if _on_message_callback and caption:
+        await _on_message_callback(caption)
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -90,6 +120,7 @@ def crear_app() -> Application:
     """Crea y configura la Application de Telegram."""
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", _start_command))
+    app.add_handler(MessageHandler(filters.PHOTO, _handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
     return app
 
