@@ -26,10 +26,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REDIRECT_URI = "http://localhost:8000/callback"
-SCOPE = "openid profile w_member_social"
+SCOPE = "w_member_social r_liteprofile"
 AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
-ME_URL = "https://api.linkedin.com/v2/me"
+ME_URL = "https://api.linkedin.com/v2/me?projection=(id)"
 
 _auth_code: str | None = None
 
