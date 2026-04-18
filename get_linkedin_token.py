@@ -26,10 +26,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REDIRECT_URI = "http://localhost:8000/callback"
-SCOPE = "w_member_social r_liteprofile"
+SCOPE = "openid profile w_member_social"
 AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
-ME_URL = "https://api.linkedin.com/v2/me?projection=(id)"
+ME_URL = "https://api.linkedin.com/v2/userinfo"
 
 _auth_code: str | None = None
 
@@ -127,7 +127,8 @@ async def main():
             headers={"Authorization": f"Bearer {access_token}"},
         )
         resp_me.raise_for_status()
-        user_id = resp_me.json()["id"]
+        me_data = resp_me.json()
+        user_id = me_data.get("sub") or me_data.get("id", "")
 
     print("\n" + "=" * 60)
     print("✅ Copia estas líneas en tu archivo .env:")
