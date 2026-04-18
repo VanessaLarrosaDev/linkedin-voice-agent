@@ -30,6 +30,7 @@ from telegram_bot import (
     crear_app,
     enviar_mensaje,
     enviar_y_esperar_respuesta,
+    get_pending_photo,
     set_message_callback,
 )
 from scheduler import crear_scheduler, set_job_callback
@@ -191,8 +192,16 @@ async def flujo_generacion(tema: str, formato: str) -> None:
             return
 
         if respuesta.upper() == "PUBLICAR":
-            # Publicar vía MCP LinkedIn (placeholder)
-            await _publicar_linkedin(post_final)
+            # Descargar imagen adjunta si Vanessa envió una foto
+            imagen_bytes: bytes | None = None
+            foto_info = get_pending_photo()
+            if foto_info:
+                from telegram import Bot
+                bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
+                file = await bot.get_file(foto_info["file_id"])
+                imagen_bytes = bytes(await file.download_as_bytearray())
+
+            await _publicar_linkedin(post_final, imagen_bytes)
 
             # Guardar en memoria
             guardar_post({
@@ -364,17 +373,12 @@ def _parsear_temas(texto: str) -> list[str]:
     return temas[:3]
 
 
-async def _publicar_linkedin(post: str) -> None:
-    """
-    Publica el post en LinkedIn.
-    TODO: Implementar con MCP LinkedIn cuando esté disponible.
-    """
+async def _publicar_linkedin(post: str, imagen_bytes: bytes | None = None) -> None:
+    """Publica el post en LinkedIn, opcionalmente con imagen."""
     logger.info("Publicando en LinkedIn...")
     logger.info(f"Post: {post[:80]}...")
-    # Placeholder — aquí irá la integración con MCP LinkedIn
-    # Ejemplo:
-    # from mcp_linkedin import publicar
-    # await publicar(post)
+    from mcp_linkedin import publicar
+    await publicar(post, imagen_bytes)
 
 
 # ══════════════════════════════════════════════════════════════
