@@ -95,6 +95,8 @@ async def flujo_generacion(tema: str, formato: str) -> None:
     5. Enviar a Vanessa para aprobación
     6. Publicar o iterar
     """
+    global _flujo_activo
+    _flujo_activo = True
     logger.info(f"Iniciando flujo de generación — tema: '{tema}', formato: {formato}")
 
     # ── 1. Comprobar memoria ─────────────────────────────────
@@ -189,6 +191,7 @@ async def flujo_generacion(tema: str, formato: str) -> None:
 
         if not respuesta:
             await enviar_mensaje("No recibí respuesta. El post queda pendiente.")
+            _flujo_activo = False
             return
 
         if respuesta.upper() == "PUBLICAR":
@@ -214,6 +217,7 @@ async def flujo_generacion(tema: str, formato: str) -> None:
 
             await enviar_mensaje("¡Post publicado en LinkedIn! 🎉")
             logger.info("Post publicado exitosamente")
+            _flujo_activo = False
             return
 
         # Vanessa envió comentarios → rehacer con su feedback
@@ -313,15 +317,25 @@ async def modo_automatico() -> None:
 # MODO MANUAL (mensaje de Telegram)
 # ══════════════════════════════════════════════════════════════
 
+_flujo_activo = False
+
+
 async def modo_manual(texto: str) -> None:
     """
     Flujo manual cuando Vanessa envía un tema por Telegram.
     Detecta que no es una respuesta numérica y arranca la generación.
     """
+    global _flujo_activo
+
+    # Ignorar si hay un flujo en curso (el mensaje es una respuesta interna)
+    if _flujo_activo:
+        return
+
     logger.info(f"Modo manual activado — mensaje: '{texto}'")
 
     # Ignorar si es una respuesta a otra interacción
-    if texto.upper() in ("PUBLICAR", "SÍ", "SI", "NO", "1", "2", "3"):
+    if texto.upper() in ("PUBLICAR", "SÍ", "SI", "NO", "1", "2", "3",
+                         "PERSONAL", "TÉCNICO", "TECNICO"):
         return
 
     tema = texto
