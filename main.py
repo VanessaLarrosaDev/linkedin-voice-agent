@@ -85,6 +85,9 @@ def detectar_formato(tema: str) -> str | None:
 # FLUJO DE GENERACIÓN
 # ══════════════════════════════════════════════════════════════
 
+_flujo_activo = False
+
+
 async def flujo_generacion(tema: str, formato: str) -> None:
     """
     Flujo completo de generación de un post:
@@ -99,163 +102,150 @@ async def flujo_generacion(tema: str, formato: str) -> None:
     _flujo_activo = True
     logger.info(f"Iniciando flujo de generación — tema: '{tema}', formato: {formato}")
 
-    # ── 1. Comprobar memoria ─────────────────────────────────
-    repetido, temas_similares = tema_repetido(tema)
-    if repetido:
-        aviso = (
-            f"He detectado que este tema es similar a posts recientes:\n"
-            + "\n".join(f"  • {t}" for t in temas_similares)
-            + "\n\nSugiero un ángulo distinto. ¿Quieres continuar igualmente? (sí/no)"
-        )
-        respuesta = await enviar_y_esperar_respuesta(aviso)
-        if respuesta.lower() not in ("sí", "si", "s", "yes"):
-            await enviar_mensaje("Entendido. Envíame otro tema cuando quieras.")
-            return
+    try:
+        # ── 1. Comprobar memoria ─────────────────────────────────
+        repetido, temas_similares = tema_repetido(tema)
+        if repetido:
+            aviso = (
+                f"He detectado que este tema es similar a posts recientes:\n"
+                + "\n".join(f"  • {t}" for t in temas_similares)
+                + "\n\nSugiero un ángulo distinto. ¿Quieres continuar igualmente? (sí/no)"
+            )
+            respuesta = await enviar_y_esperar_respuesta(aviso)
+            if respuesta.lower() not in ("sí", "si", "s", "yes"):
+                await enviar_mensaje("Entendido. Envíame otro tema cuando quieras.")
+                return
 
-    # ── 2. Investigar ────────────────────────────────────────
-    await enviar_mensaje(f"Investigando sobre '{tema}'...")
+        # ── 2. Investigar ────────────────────────────────────────
+        await enviar_mensaje(f"Investigando sobre '{tema}'...")
 
-    investigador = crear_investigador()
-    task_inv = tarea_investigar(investigador, tema)
-    crew_inv = Crew(agents=[investigador], tasks=[task_inv], verbose=True)
-    resultado_inv = crew_inv.kickoff()
-    contexto = str(resultado_inv)
+        investigador = crear_investigador()
+        task_inv = tarea_investigar(investigador, tema)
+        crew_inv = Crew(agents=[investigador], tasks=[task_inv], verbose=True)
+        resultado_inv = crew_inv.kickoff()
+        contexto = str(resultado_inv)
+        logger.info("Investigación completada")
 
-    logger.info("Investigación completada")
+        # ── 3 y 4. Redactar + Editar (con reintentos) ───────────
+        redactor = crear_redactor()
+        editor = crear_editor()
+        feedback_editor = ""
+        resultado_editor = None
 
-    # ── 3 y 4. Redactar + Editar (con reintentos) ───────────
-    redactor = crear_redactor()
-    editor = crear_editor()
-    feedback_editor = ""
-    resultado_editor = None
+        for intento in range(1, MAX_INTENTOS_EDITOR + 1):
+            logger.info(f"Intento de redacción {intento}/{MAX_INTENTOS_EDITOR}")
 
-    for intento in range(1, MAX_INTENTOS_EDITOR + 1):
-        logger.info(f"Intento de redacción {intento}/{MAX_INTENTOS_EDITOR}")
+            task_red = tarea_redactar(redactor, tema, formato, contexto, feedback_editor)
+            crew_red = Crew(agents=[redactor], tasks=[task_red], verbose=True)
+            post_borrador = str(crew_red.kickoff())
 
-        # Redactar
-        task_red = tarea_redactar(
-            redactor, tema, formato, contexto, feedback_editor
-        )
-        crew_red = Crew(agents=[redactor], tasks=[task_red], verbose=True)
-        resultado_red = crew_red.kickoff()
-        post_borrador = str(resultado_red)
+            task_edit = tarea_editar(editor, post_borrador, formato)
+            crew_edit = Crew(agents=[editor], tasks=[task_edit], verbose=True)
+            resultado_editor = _parsear_resultado_editor(str(crew_edit.kickoff()))
 
-        # Editar
-        task_edit = tarea_editar(editor, post_borrador, formato)
-        crew_edit = Crew(agents=[editor], tasks=[task_edit], verbose=True)
-        resultado_edit = crew_edit.kickoff()
+            if resultado_editor is None:
+                logger.warning("No se pudo parsear la respuesta del editor")
+                resultado_editor = {
+                    "puntuacion": 5,
+                    "post_mejorado": post_borrador,
+                    "razon_cambio": "Error al parsear respuesta del editor",
+                    "formato_usado": formato,
+                }
 
-        # Parsear JSON del editor
-        resultado_editor = _parsear_resultado_editor(str(resultado_edit))
+            puntuacion = resultado_editor["puntuacion"]
+            logger.info(f"Puntuación del editor: {puntuacion}/10")
 
-        if resultado_editor is None:
-            logger.warning("No se pudo parsear la respuesta del editor")
-            resultado_editor = {
-                "puntuacion": 5,
-                "post_mejorado": post_borrador,
-                "razon_cambio": "Error al parsear respuesta del editor",
-                "formato_usado": formato,
-            }
+            if puntuacion >= 7:
+                break
 
-        puntuacion = resultado_editor["puntuacion"]
-        logger.info(f"Puntuación del editor: {puntuacion}/10")
+            feedback_editor = resultado_editor["razon_cambio"]
+            logger.info(f"Puntuación baja ({puntuacion}). Reintentando con feedback...")
 
-        if puntuacion >= 7:
-            break
-
-        # Si la puntuación es baja y quedan intentos, pasar feedback
-        feedback_editor = resultado_editor["razon_cambio"]
-        logger.info(f"Puntuación baja ({puntuacion}). Reintentando con feedback...")
-
-    # ── 5. Enviar a Vanessa ──────────────────────────────────
-    post_final = resultado_editor["post_mejorado"]
-    puntuacion_final = resultado_editor["puntuacion"]
-
-    nota_revision = ""
-    if puntuacion_final < 7:
-        nota_revision = "\n⚠️ Nota: este post no alcanzó la puntuación mínima. Requiere revisión."
-
-    mensaje_aprobacion = (
-        f"Tu post de esta semana:\n"
-        f"──────────────────\n"
-        f"{post_final}\n"
-        f"──────────────────\n"
-        f"Puntuación: {puntuacion_final}/10{nota_revision}\n\n"
-        f"✅ Escribe PUBLICAR para aprobar\n"
-        f"✏️ O escribe tus comentarios para mejorar"
-    )
-
-    # ── 6. Bucle de aprobación ───────────────────────────────
-    while True:
-        respuesta = await enviar_y_esperar_respuesta(mensaje_aprobacion)
-
-        if not respuesta:
-            await enviar_mensaje("No recibí respuesta. El post queda pendiente.")
-            _flujo_activo = False
-            return
-
-        if respuesta.upper() == "PUBLICAR":
-            # Descargar imagen adjunta si Vanessa envió una foto
-            imagen_bytes: bytes | None = None
-            foto_info = get_pending_photo()
-            if foto_info:
-                from telegram import Bot
-                bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
-                file = await bot.get_file(foto_info["file_id"])
-                imagen_bytes = bytes(await file.download_as_bytearray())
-
-            await _publicar_linkedin(post_final, imagen_bytes)
-
-            # Guardar en memoria
-            guardar_post({
-                "fecha": datetime.now().strftime("%Y-%m-%d"),
-                "tema": tema,
-                "formato": formato,
-                "puntuacion_editor": puntuacion_final,
-                "publicado": True,
-            })
-
-            await enviar_mensaje("¡Post publicado en LinkedIn! 🎉")
-            logger.info("Post publicado exitosamente")
-            _flujo_activo = False
-            return
-
-        # Vanessa envió comentarios → rehacer con su feedback
-        await enviar_mensaje("Rehaciendo el post con tus comentarios...")
-
-        task_red = tarea_redactar(
-            redactor, tema, formato, contexto,
-            feedback_editor=f"Comentarios de Vanessa: {respuesta}"
-        )
-        crew_red = Crew(agents=[redactor], tasks=[task_red], verbose=True)
-        resultado_red = crew_red.kickoff()
-        post_borrador = str(resultado_red)
-
-        task_edit = tarea_editar(editor, post_borrador, formato)
-        crew_edit = Crew(agents=[editor], tasks=[task_edit], verbose=True)
-        resultado_edit = crew_edit.kickoff()
-
-        resultado_editor = _parsear_resultado_editor(str(resultado_edit))
-        if resultado_editor is None:
-            resultado_editor = {
-                "puntuacion": 5,
-                "post_mejorado": post_borrador,
-                "razon_cambio": "Error al parsear",
-                "formato_usado": formato,
-            }
-
+        # ── 5. Enviar a Vanessa ──────────────────────────────────
         post_final = resultado_editor["post_mejorado"]
         puntuacion_final = resultado_editor["puntuacion"]
 
+        nota_revision = ""
+        if puntuacion_final < 7:
+            nota_revision = "\n⚠️ Nota: este post no alcanzó la puntuación mínima. Requiere revisión."
+
         mensaje_aprobacion = (
-            f"Post actualizado:\n"
+            f"Tu post de esta semana:\n"
             f"──────────────────\n"
             f"{post_final}\n"
             f"──────────────────\n"
-            f"Puntuación: {puntuacion_final}/10\n\n"
+            f"Puntuación: {puntuacion_final}/10{nota_revision}\n\n"
             f"✅ Escribe PUBLICAR para aprobar\n"
-            f"✏️ O escribe tus comentarios para mejorar"
+            f"✏️ O escribe tus comentarios para mejorar\n"
+            f"📸 O envía una foto con caption PUBLICAR para publicar con imagen"
         )
+
+        # ── 6. Bucle de aprobación ───────────────────────────────
+        while True:
+            respuesta = await enviar_y_esperar_respuesta(mensaje_aprobacion, timeout=7200)
+
+            if not respuesta:
+                await enviar_mensaje("No recibí respuesta en 2 horas. El post queda pendiente. Envíame el tema de nuevo cuando quieras.")
+                return
+
+            if respuesta.upper() == "PUBLICAR":
+                imagen_bytes: bytes | None = None
+                foto_info = get_pending_photo()
+                if foto_info:
+                    from telegram import Bot
+                    bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
+                    file = await bot.get_file(foto_info["file_id"])
+                    imagen_bytes = bytes(await file.download_as_bytearray())
+
+                await _publicar_linkedin(post_final, imagen_bytes)
+                guardar_post({
+                    "fecha": datetime.now().strftime("%Y-%m-%d"),
+                    "tema": tema,
+                    "formato": formato,
+                    "puntuacion_editor": puntuacion_final,
+                    "publicado": True,
+                })
+                await enviar_mensaje("¡Post publicado en LinkedIn! 🎉")
+                logger.info("Post publicado exitosamente")
+                return
+
+            # Vanessa envió comentarios → rehacer con su feedback
+            await enviar_mensaje("Rehaciendo el post con tus comentarios...")
+
+            task_red = tarea_redactar(
+                redactor, tema, formato, contexto,
+                feedback_editor=f"Instrucciones de Vanessa (prioridad máxima, incorporar exactamente): {respuesta}"
+            )
+            crew_red = Crew(agents=[redactor], tasks=[task_red], verbose=True)
+            post_borrador = str(crew_red.kickoff())
+
+            task_edit = tarea_editar(editor, post_borrador, formato)
+            crew_edit = Crew(agents=[editor], tasks=[task_edit], verbose=True)
+            resultado_editor = _parsear_resultado_editor(str(crew_edit.kickoff()))
+            if resultado_editor is None:
+                resultado_editor = {
+                    "puntuacion": 5,
+                    "post_mejorado": post_borrador,
+                    "razon_cambio": "Error al parsear",
+                    "formato_usado": formato,
+                }
+
+            post_final = resultado_editor["post_mejorado"]
+            puntuacion_final = resultado_editor["puntuacion"]
+
+            mensaje_aprobacion = (
+                f"Post actualizado:\n"
+                f"──────────────────\n"
+                f"{post_final}\n"
+                f"──────────────────\n"
+                f"Puntuación: {puntuacion_final}/10\n\n"
+                f"✅ Escribe PUBLICAR para aprobar\n"
+                f"✏️ O escribe tus comentarios para mejorar\n"
+                f"📸 O envía una foto con caption PUBLICAR para publicar con imagen"
+            )
+
+    finally:
+        _flujo_activo = False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -269,89 +259,82 @@ async def modo_automatico() -> None:
     2. Vanessa elige uno
     3. Se detecta formato y se genera el post
     """
+    global _flujo_activo
+    _flujo_activo = True
     logger.info("Ejecutando modo automático (lunes 9:00)")
 
-    investigador = crear_investigador()
-    task_temas = tarea_proponer_temas(investigador)
-    crew_temas = Crew(agents=[investigador], tasks=[task_temas], verbose=True)
-    resultado = crew_temas.kickoff()
+    try:
+        investigador = crear_investigador()
+        task_temas = tarea_proponer_temas(investigador)
+        crew_temas = Crew(agents=[investigador], tasks=[task_temas], verbose=True)
+        temas_texto = str(crew_temas.kickoff()).strip()
 
-    temas_texto = str(resultado).strip()
+        mensaje = (
+            f"¡Buenos días Vanessa! Temas de esta semana:\n\n"
+            f"{temas_texto}\n\n"
+            f"Responde con 1, 2 o 3"
+        )
+        respuesta = await enviar_y_esperar_respuesta(mensaje)
+        temas_lista = _parsear_temas(temas_texto)
 
-    mensaje = (
-        f"¡Buenos días Vanessa! Temas de esta semana:\n\n"
-        f"{temas_texto}\n\n"
-        f"Responde con 1, 2 o 3"
-    )
-
-    respuesta = await enviar_y_esperar_respuesta(mensaje)
-
-    # Parsear la elección
-    temas_lista = _parsear_temas(temas_texto)
-
-    if respuesta in ("1", "2", "3"):
-        idx = int(respuesta) - 1
-        if idx < len(temas_lista):
-            tema = temas_lista[idx]
+        if respuesta in ("1", "2", "3"):
+            idx = int(respuesta) - 1
+            tema = temas_lista[idx] if idx < len(temas_lista) else temas_lista[0]
         else:
-            tema = temas_lista[0]
-    else:
-        # Si no es un número, usar la respuesta como tema personalizado
-        tema = respuesta
+            tema = respuesta
 
-    formato = detectar_formato(tema)
-    if formato is None:
-        resp_formato = await enviar_y_esperar_respuesta(
-            "¿Es una experiencia personal o un tema técnico?\n"
-            "Responde: personal / técnico"
-        )
-        formato = (
-            "storytelling" if "personal" in resp_formato.lower()
-            else "tecnico"
-        )
+        formato = detectar_formato(tema)
+        if formato is None:
+            resp_formato = await enviar_y_esperar_respuesta(
+                "¿Es una experiencia personal o un tema técnico?\n"
+                "Responde: personal / técnico"
+            )
+            formato = "storytelling" if "personal" in resp_formato.lower() else "tecnico"
 
-    await flujo_generacion(tema, formato)
+        _flujo_activo = False
+        await flujo_generacion(tema, formato)
+    finally:
+        _flujo_activo = False
 
 
 # ══════════════════════════════════════════════════════════════
 # MODO MANUAL (mensaje de Telegram)
 # ══════════════════════════════════════════════════════════════
 
-_flujo_activo = False
-
-
 async def modo_manual(texto: str) -> None:
     """
     Flujo manual cuando Vanessa envía un tema por Telegram.
-    Detecta que no es una respuesta numérica y arranca la generación.
+    Solo arranca si no hay ningún flujo activo.
     """
     global _flujo_activo
 
-    # Ignorar si hay un flujo en curso (el mensaje es una respuesta interna)
+    # Bloquear si hay un flujo en curso
     if _flujo_activo:
         return
 
     logger.info(f"Modo manual activado — mensaje: '{texto}'")
 
-    # Ignorar si es una respuesta a otra interacción
+    # Ignorar respuestas a interacciones internas
     if texto.upper() in ("PUBLICAR", "SÍ", "SI", "NO", "1", "2", "3",
                          "PERSONAL", "TÉCNICO", "TECNICO"):
         return
 
-    tema = texto
-    formato = detectar_formato(tema)
+    _flujo_activo = True
+    try:
+        tema = texto
+        formato = detectar_formato(tema)
 
-    if formato is None:
-        resp = await enviar_y_esperar_respuesta(
-            "¿Es una experiencia personal o un tema técnico?\n"
-            "Responde: personal / técnico"
-        )
-        formato = (
-            "storytelling" if "personal" in resp.lower()
-            else "tecnico"
-        )
+        if formato is None:
+            resp = await enviar_y_esperar_respuesta(
+                "¿Es una experiencia personal o un tema técnico?\n"
+                "Responde: personal / técnico"
+            )
+            formato = "storytelling" if "personal" in resp.lower() else "tecnico"
 
-    await flujo_generacion(tema, formato)
+        _flujo_activo = False
+        await flujo_generacion(tema, formato)
+    finally:
+        _flujo_activo = False
 
 
 # ══════════════════════════════════════════════════════════════
